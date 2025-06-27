@@ -272,6 +272,7 @@ def solve_group(students, zone_map, cost, cap_map, full_map, days, *, late: bool
             cap_map[(w, d, t)] -= 1
     
     return rows
+  
 def main():
     # 1) Load everything
     sched, prefs = load_data()
