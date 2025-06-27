@@ -1056,8 +1056,77 @@ def build_student_dates(prefs):
     return prefs.groupby('Student')['Parsed_Date'].first().to_dict()
 
 
+def greedy_assign(students, zone_map, cost, cap_map, full_map, days):
+    """Greedily assign remaining students to any available slots.
+
+    The assignment prefers lower ranked workshops but does not enforce the
+    complex two-per-zone requirement.  Capacity limits and the restriction
+    that a student may not receive the same workshop twice are still
+    honoured.
+    """
+
+    rows = []
+    workshops = sorted({w for (w, _, _) in cap_map})
+
+    for s in students:
+        used_workshops = set()
+        used_slots = {}
+
+        for day in days:
+            # try a full-day workshop first
+            full_candidates = [
+                w for (w, d, t) in cap_map
+                if d == day and t == 0 and cap_map[(w, d, t)] > 0
+                and w not in used_workshops
+            ]
+            full_candidates.sort(key=lambda w: cost.get((s, w), 99))
+
+            if full_candidates:
+                w = full_candidates[0]
+                rows.append({
+                    'Student': s,
+                    'Zone': zone_map[w],
+                    'Day': day,
+                    'Session': 0,
+                    'Workshop Title': w,
+                })
+                cap_map[(w, day, 0)] -= 1
+                used_workshops.add(w)
+                used_slots[(day, 1)] = True
+                used_slots[(day, 2)] = True
+                continue
+
+            # otherwise handle the two half-day slots
+            for sess in [1, 2]:
+                if used_slots.get((day, sess)):
+                    continue
+
+                candidates = [
+                    w for (w, d, t) in cap_map
+                    if d == day and t == sess and cap_map[(w, d, t)] > 0
+                    and w not in used_workshops
+                ]
+                if not candidates:
+                    continue
+
+                candidates.sort(key=lambda w: cost.get((s, w), 99))
+                w = candidates[0]
+                rows.append({
+                    'Student': s,
+                    'Zone': zone_map[w],
+                    'Day': day,
+                    'Session': sess,
+                    'Workshop Title': w,
+                })
+                cap_map[(w, day, sess)] -= 1
+                used_workshops.add(w)
+                used_slots[(day, sess)] = True
+
+    return rows
+
+
 def solve_group(students, zone_map, cost, cap_map, full_map, days, *, late: bool = False):
-    """Solve the optimization for a subset of students.
+    """Assign workshops for a subset of students.
 
     Parameters
     ----------
@@ -1083,6 +1152,12 @@ def solve_group(students, zone_map, cost, cap_map, full_map, days, *, late: bool
 
     if not students:
         return []
+
+    # ``late`` students will be handled by a greedy heuristic instead of
+    # solving the full MILP.  This keeps the problem feasible while still
+    # respecting capacities and avoiding duplicate workshops.
+    if late:
+        return greedy_assign(students, zone_map, cost, cap_map, full_map, days)
 
     prob = pulp.LpProblem('Workshop_Assignment', pulp.LpMinimize)
     x = {
@@ -1311,95 +1386,17 @@ def main():
             })
 
     # 5) Solve sequentially for each group
-    # rows += solve_group(students_early, zone_map, cost, cap_map, full_map, days)
-    # rows += solve_group(students_mid, zone_map, cost, cap_map, full_map, days)
-    # rows += solve_group(students_late, zone_map, cost, cap_map, full_map, days)
-    print("\n🩺  Feasibility check ‑ early cohort one‑by‑one")
-    for stu in students_early:
-        # make an isolated copy of the capacity map for this test
-        cap_tmp = cap_map.copy()
-
-        # build a *tiny* problem for a single student
-        try:
-            rows_test = solve_group(
-                [stu],          # only this student
-                zone_map,
-                cost,
-                cap_tmp,
-                full_map,
-                days,
-            )
-            if not rows_test:          # no rows returned  -> infeasible
-                print(f"   ✘ fails for {stu!r}")
-            else:                      # at least one assignment -> feasible
-                print(f"   ✓ ok for   {stu!r}")
-        except pulp.PulpSolverError:
-            # CBC raised an error instead of returning normally
-            print(f"   ✘ fails for {stu!r} (solver error)")
-    print("🩺  Feasibility probe finished\n")
-
-    # right after building cap_map:
-    print("\n--- Thursday full‑day sessions ---")
-    print(pd.DataFrame([
-        {'Workshop': w, 'Day': d, 'Session': t, 'Cap': cap}
-        for (w, d, t), cap in cap_map.items()
-        if d == 'Thursday'
-    ]))
-    print("\n--- Wednesday half‑day for Zwemmen ---")
-    print(cap_map.get(('Zwemmen','Wednesday',1), '<missing>'),
-        cap_map.get(('Zwemmen','Wednesday',2), '<missing>'))
-    print("\n--- Wednesday half‑day for Vissen ---")
-    print(cap_map.get(('Vissen','Wednesday',1), '<missing>'),
-        cap_map.get(('Vissen','Wednesday',2), '<missing>'))
-
-
-    print("\n🩺  Incremental build‑up test (early cohort)")
-    cap_tmp = cap_map.copy()
-    chosen  = []
-
-    for stu in students_early:
-        chosen.append(stu)
-        try:
-            # Solve for everyone chosen so far, but on a *copy* of cap_tmp
-            rows_tmp = solve_group(chosen,
-                                zone_map,
-                                cost,
-                                cap_tmp.copy(),
-                                full_map,
-                                days,
-                                late=False)
-            if rows_tmp:
-                print(f"   ✓ cumulative ok with {len(chosen):3} students (last added: {stu})")
-                # Only remove seats for *this* new student
-                new_assigns = [r for r in rows_tmp if r['Student'] == stu]
-                for r in new_assigns:
-                    key = (r['Workshop Title'], r['Day'], r['Session'])
-                    cap_tmp[key] -= 1
-            else:
-                print(f"   ✘ infeasible when adding {stu!r} (student #{len(chosen)})")
-                break
-
-        except pulp.PulpSolverError:
-            print(f"   ✘ solver error when adding {stu!r} (student #{len(chosen)})")
-            break
-
-    print("🩺  Incremental test finished\n")
-
-
-
     rows += solve_group(students_early, zone_map, cost, cap_map, full_map, days, late=False)
 
-    rows += solve_group(students_mid, zone_map, cost, cap_map, full_map, days, late=False)
-
-    rows += solve_group(students_late,  zone_map, cost, cap_map, full_map, days, late=True)
-
+    # Remaining students are scheduled greedily based on their preferences
+    remaining_students = students_mid + students_late
+    rows += solve_group(remaining_students, zone_map, cost, cap_map, full_map, days, late=True)
 
     out = pd.DataFrame(rows)
     out = out[['Student', 'Zone', 'Day', 'Session', 'Workshop Title']]
 
-    df = pd.DataFrame(rows)
     dups = (
-        df
+        out
         .groupby(['Student', 'Workshop Title'])
         .size()
         .reset_index(name='count')
