@@ -143,153 +143,122 @@ def solve_group(students, zone_map, cost, cap_map, full_map, days, *, late: bool
     if late:
         return greedy_assign(students, zone_map, cost, cap_map, full_map, days)
 
-    prob = pulp.LpProblem('Workshop_Assignment', pulp.LpMinimize)
-    x = {
-        (s, w, d, t): pulp.LpVariable(
-            f"x_{s}_{w.replace(' ','_')}_{d}_T{t}", cat='Binary'
+    def build_problem(enforce_zone=True):
+        prob = pulp.LpProblem('Workshop_Assignment', pulp.LpMinimize)
+        x = {
+            (s, w, d, t): pulp.LpVariable(
+                f"x_{s}_{w.replace(' ','_')}_{d}_T{t}", cat='Binary'
+            )
+            for s in students
+            for (w, d, t) in cap_map
+        }
+    
+        zones = sorted(set(zone_map.values()))
+    
+        if enforce_zone:
+            for s in students:
+                for z in zones:
+                    half_pairs = [
+                        (w, x[(s, w, d, t)])
+                        for (w, d, t) in cap_map
+                        if not full_map[(w, d, t)] and zone_map[w] == z
+                    ]
+                    full_pairs = [
+                        (w, x[(s, w, d, 0)])
+                        for (w, d, t) in cap_map
+                        if full_map[(w, d, t)] and zone_map[w] == z
+                    ]
+    
+                    rank1_set = {w for (w, _) in half_pairs + full_pairs if cost.get((s, w), 999) == 1}
+                    rank2_set = {w for (w, _) in half_pairs + full_pairs if cost.get((s, w), 999) == 2 and w not in rank1_set}
+    
+                    first_half = [v for (w, v) in half_pairs if w in rank1_set]
+                    first_full = [v for (w, v) in full_pairs if w in rank1_set]
+                    second_half = [v for (w, v) in half_pairs if w in rank2_set]
+                    second_full = [v for (w, v) in full_pairs if w in rank2_set]
+                    other_half = [v for (w, v) in half_pairs if w not in rank1_set and w not in rank2_set]
+                    other_full = [v for (w, v) in full_pairs if w not in rank1_set and w not in rank2_set]
+    
+                    fsz = pulp.lpSum(first_half) + 2 * pulp.lpSum(first_full)
+                    ssz = pulp.lpSum(second_half) + 2 * pulp.lpSum(second_full)
+                    osz = pulp.lpSum(other_half) + 2 * pulp.lpSum(other_full)
+    
+                    allow_random = 1 if len(rank2_set) == 0 else 0
+    
+                    prob += (fsz + ssz + osz == 2, f"TwoPerZone_{s}_{z}")
+                    prob += (ssz >= 2 - fsz, f"UseSeconds_{s}_{z}")
+                    prob += (osz <= allow_random, f"RandLimit_{s}_{z}")
+    
+        for (w, d, t), cap in cap_map.items():
+            prob += (
+                pulp.lpSum(x[(s, w, d, t)] for s in students) <= cap,
+                f"Cap_{w.replace(' ','_')}_{d}_T{t}"
+            )
+    
+        workshops = sorted({w for (w, d, t) in cap_map.keys()})
+        for s in students:
+            for w in workshops:
+                prob += (
+                    pulp.lpSum(
+                        x[(s, w, d, t)]
+                        for (w2, d, t) in cap_map
+                        if w2 == w
+                    ) <= 1,
+                    f"NoRepeat_{s}_{w.replace(' ','_')}"
+                )
+    
+        for s in students:
+            for d in days:
+                prob += (
+                    pulp.lpSum(
+                        x[(s, w, d, 1)]
+                        for (w, d2, t) in cap_map
+                        if d2 == d and t == 1
+                    )
+                    + pulp.lpSum(
+                        x[(s, w, d, 0)]
+                        for (w, d2, t) in cap_map
+                        if d2 == d and t == 0 and full_map[(w, d2, t)]
+                    )
+                    == 1,
+                    f"OnePerSlot_{s}_{d}_Sess1",
+                )
+                prob += (
+                    pulp.lpSum(
+                        x[(s, w, d, 2)]
+                        for (w, d2, t) in cap_map
+                        if d2 == d and t == 2
+                    )
+                    + pulp.lpSum(
+                        x[(s, w, d, 0)]
+                        for (w, d2, t) in cap_map
+                        if d2 == d and t == 0 and full_map[(w, d2, t)]
+                    )
+                    == 1,
+                    f"OnePerSlot_{s}_{d}_Sess2",
+                )
+    
+        prob += pulp.lpSum(
+            cost.get((s, w), 99) * var
+            for ((s, w, d, t), var) in x.items()
         )
-        for s in students
-        for (w, d, t) in cap_map
-    }
-
-    zones = sorted(set(zone_map.values()))
-
-    # ------------------------------------------------------------------
-    # Two per zone with first→second→random fallback
-    # ------------------------------------------------------------------
-    for s in students:
-        for z in zones:
-            half_pairs = [
-                (w, x[(s,w,d,t)])
-                for (w,d,t) in cap_map
-                if not full_map[(w,d,t)] and zone_map[w] == z
-            ]
-            full_pairs = [
-                (w, x[(s,w,d,0)])
-                for (w,d,t) in cap_map
-                if     full_map[(w,d,t)] and zone_map[w] == z
-            ]
-
-            # collect distinct first‑ and second‑choice **workshop titles**
-            rank1_set = { w for (w,_) in half_pairs+full_pairs
-                        if cost.get((s,w),999)==1 }
-            rank2_set = { w for (w,_) in half_pairs+full_pairs
-                        if cost.get((s,w),999)==2 and w not in rank1_set }
-
-            # bucket the vars by preference tier
-            first_half  = [v for (w,v) in half_pairs if w in rank1_set]
-            first_full  = [v for (w,v) in full_pairs if w in rank1_set]
-            second_half = [v for (w,v) in half_pairs if w in rank2_set]
-            second_full = [v for (w,v) in full_pairs if w in rank2_set]
-            other_half  = [v for (w,v) in half_pairs
-                            if w not in rank1_set and w not in rank2_set]
-            other_full  = [v for (w,v) in full_pairs
-                            if w not in rank1_set and w not in rank2_set]
-
-            fsz = pulp.lpSum(first_half)  + 2*pulp.lpSum(first_full)
-            ssz = pulp.lpSum(second_half) + 2*pulp.lpSum(second_full)
-            osz = pulp.lpSum(other_half)  + 2*pulp.lpSum(other_full)
-
-            # how many random slots are allowed?
-            # only if no distinct second choices were provided
-            allow_random = 1 if len(rank2_set)==0 else 0
-
-            # 1) exactly two slots in this zone
-            prob += (fsz + ssz + osz == 2,
-                    f"TwoPerZone_{s}_{z}")
-
-            # 2) fill any missing #1 slots with #2s
-            prob += (ssz >= 2 - fsz,
-                    f"UseSeconds_{s}_{z}")
-
-            # 3) if they supplied *no* distinct 2nd choices, allow up to one wild‑card
-            prob += (osz <= allow_random,
-                    f"RandLimit_{s}_{z}")
-    # ------------------------------------------------------------------
-
-    # Capacity constraints
-    for (w, d, t), cap in cap_map.items():
-        prob += (
-            pulp.lpSum(x[(s, w, d, t)] for s in students) <= cap,
-            f"Cap_{w.replace(' ','_')}_{d}_T{t}"
-        )
-
-    # # ── No repeats: each student may take a given workshop at most once ──
-    # workshops = sorted({ w for (w, d, t) in cap_map.keys() })
-    # for s in students:
-    #     for w0 in workshops:
-    #         # collect all decision vars for this student & workshop
-    #         terms = []
-    #         for (s2, w2, d2, t2), var in x.items():
-    #             if s2 == s and w2 == w0:
-    #                 terms.append(var)
-    #         # enforce at most one assignment to workshop w0 for student s
-    #         prob += (
-    #             pulp.lpSum(terms) <= 1,
-    #             f"NoRepeat_{s}_{w0.replace(' ','_')}"
-    #         )
-    #     # ── No repeats: each student may take a given workshop at most once ──
-        # ── No repeats: each student may take a given workshop at most once ──
-    workshops = sorted({ w for (w, d, t) in cap_map.keys() })
-    for s in students:
-        for w in workshops:
-            prob += (
-                pulp.lpSum(
-                    x[(s, w, d, t)]
-                    for (w2, d, t) in cap_map
-                    if w2 == w
-                ) <= 1,
-                f"NoRepeat_{s}_{w.replace(' ','_')}"
-            )
-
-
-
-
-    # One slot per day/session
-    for s in students:
-        for d in days:
-            prob += (
-                pulp.lpSum(
-                    x[(s, w, d, 1)]
-                    for (w, d2, t) in cap_map
-                    if d2 == d and t == 1
-                )
-                + pulp.lpSum(
-                    x[(s, w, d, 0)]
-                    for (w, d2, t) in cap_map
-                    if d2 == d and t == 0 and full_map[(w, d2, t)]
-                )
-                == 1,
-                f"OnePerSlot_{s}_{d}_Sess1",
-            )
-            prob += (
-                pulp.lpSum(
-                    x[(s, w, d, 2)]
-                    for (w, d2, t) in cap_map
-                    if d2 == d and t == 2
-                )
-                + pulp.lpSum(
-                    x[(s, w, d, 0)]
-                    for (w, d2, t) in cap_map
-                    if d2 == d and t == 0 and full_map[(w, d2, t)]
-                )
-                == 1,
-                f"OnePerSlot_{s}_{d}_Sess2",
-            )
-
-    # Objective
-    prob += pulp.lpSum(
-        cost.get((s, w), 99) * var
-        for ((s, w, d, t), var) in x.items()
-    )
-
-
-    result = prob.solve(pulp.PULP_CBC_CMD(msg=True, timeLimit=60))
+    
+        return prob, x
+    
+    prob, x = build_problem(enforce_zone=True)
+    prob.solve(pulp.PULP_CBC_CMD(msg=True, timeLimit=60))
     status = pulp.LpStatus[prob.status]
+    
+    if status != 'Optimal':
+        print('Strict MILP infeasible; relaxing zone constraints')
+        prob, x = build_problem(enforce_zone=False)
+        prob.solve(pulp.PULP_CBC_CMD(msg=True, timeLimit=60))
+        status = pulp.LpStatus[prob.status]
+    
     if status != 'Optimal':
         print(f"MILP solver returned {status}. Falling back to greedy.")
         return greedy_assign(students, zone_map, cost, cap_map, full_map, days)
-
+    
     rows = []
     for (s, w, d, t), var in x.items():
         if var.value() == 1:
@@ -301,9 +270,8 @@ def solve_group(students, zone_map, cost, cap_map, full_map, days, *, late: bool
                 'Workshop Title': w,
             })
             cap_map[(w, d, t)] -= 1
-
+    
     return rows
-
 def main():
     # 1) Load everything
     sched, prefs = load_data()
