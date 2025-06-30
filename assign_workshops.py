@@ -275,13 +275,11 @@ def solve_group(
                     other_total = pulp.lpSum(other_half) + pulp.lpSum(other_full)
                     full_total = pulp.lpSum(first_full + second_full + other_full)
 
-                    # Allow random assignments when necessary.  Limiting these
-                    # to zero caused infeasibility whenever preferred
-                    # workshops were full.  Because each zone requires two
-                    # slots, a generous upper bound of ``2`` effectively means
-                    # "no restriction" while still keeping the constraint
-                    # well-formed.
-                    allow_random = 2
+                    # Only allow a random workshop when no second-preference
+                    # options exist for this student in this zone.  This keeps
+                    # the zone constraint strict while still letting the model
+                    # fill otherwise empty slots.
+                    allow_random = 1 if len(rank2_set) == 0 else 0
 
                     required = 2 - pre_h - 2 * pre_f
 
@@ -297,11 +295,8 @@ def solve_group(
                         == required,
                         f"TwoPerZone_{s}_{z}",
                     )
-                    # Do not enforce a minimum number of second-preference
-                    # assignments.  Requiring this made some instances
-                    # infeasible when capacity for second choices was limited.
                     prob += (
-                        second_total >= 0,
+                        second_total >= (required - 2 * full_total) - first_total,
                         f"UseSeconds_{s}_{z}",
                     )
                     prob += (
@@ -465,12 +460,7 @@ def main():
         else:
             pre_assign[stu] = slots
 
-    # Only Jesse and Niels are fully fixed; previously we also excluded all
-    # students that appeared in ``prev_assignments``.  That left many students
-    # with only a couple of pre-assigned workshops and no further scheduling.
-    # Keep them in the optimization so that every student receives a complete
-    # roster.
-    forced_students = {'jesse wolters', 'niels hielkema'}
+    forced_students = {'jesse wolters', 'niels hielkema'} | set(prev_assignments)
 
     # 3) Build capacity maps and subtract preassigned seats
     grp = (
