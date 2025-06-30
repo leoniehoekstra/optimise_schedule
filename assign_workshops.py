@@ -178,16 +178,28 @@ def solve_group(students, zone_map, cost, cap_map, full_map, days, *, late: bool
                     second_full = [v for (w, v) in full_pairs if w in rank2_set]
                     other_half = [v for (w, v) in half_pairs if w not in rank1_set and w not in rank2_set]
                     other_full = [v for (w, v) in full_pairs if w not in rank1_set and w not in rank2_set]
-    
-                    fsz = pulp.lpSum(first_half) + 2 * pulp.lpSum(first_full)
-                    ssz = pulp.lpSum(second_half) + 2 * pulp.lpSum(second_full)
-                    osz = pulp.lpSum(other_half) + 2 * pulp.lpSum(other_full)
-    
+
+                    first_total = pulp.lpSum(first_half) + pulp.lpSum(first_full)
+                    second_total = pulp.lpSum(second_half) + pulp.lpSum(second_full)
+                    other_total = pulp.lpSum(other_half) + pulp.lpSum(other_full)
+                    full_total = pulp.lpSum(first_full + second_full + other_full)
+
                     allow_random = 1 if len(rank2_set) == 0 else 0
-    
-                    prob += (fsz + ssz + osz == 2, f"TwoPerZone_{s}_{z}")
-                    prob += (ssz >= 2 - fsz, f"UseSeconds_{s}_{z}")
-                    prob += (osz <= allow_random, f"RandLimit_{s}_{z}")
+
+                    prob += (
+                        first_total + second_total + other_total
+                        == 2 - full_total,
+                        f"TwoPerZone_{s}_{z}",
+                    )
+                    prob += (
+                        second_total >= (2 - full_total) - first_total,
+                        f"UseSeconds_{s}_{z}",
+                    )
+                    prob += (
+                        other_total <= allow_random,
+                        f"RandLimit_{s}_{z}",
+                    )
+                    prob += (full_total <= 1, f"OneFull_{s}_{z}")
     
         for (w, d, t), cap in cap_map.items():
             prob += (
@@ -298,7 +310,28 @@ def main():
         ],
     }
 
-    forced_students = set(pre_assign.keys())
+    def load_vissen_assignments():
+        df = pd.read_csv('einde.csv')
+        df = df[df['Workshop Title'].str.lower() == 'vissen']
+        mapping = {}
+        for _, r in df.iterrows():
+            stu = r['Student']
+            d = r['Day']
+            t = int(r['Session'])
+            mapping.setdefault(stu, []).append(('Vissen', d, t))
+        return mapping
+
+    # merge all preassigned vissen slots
+    for stu, slots in load_vissen_assignments().items():
+        if stu in pre_assign:
+            existing = set(pre_assign[stu])
+            for sl in slots:
+                if sl not in existing:
+                    pre_assign[stu].append(sl)
+        else:
+            pre_assign[stu] = slots
+
+    forced_students = {'jesse wolters', 'niels hielkema'}
 
     # 3) Build capacity maps and subtract preassigned seats
     grp = (
@@ -327,7 +360,8 @@ def main():
     early_cut = datetime(2025, 6, 23)
     mid_cut = datetime(2025, 6, 24)
 
-    all_students = [s for s in sorted(prefs['Student'].unique()) if s not in forced_students]
+    all_students = sorted(prefs['Student'].unique())
+    all_students = [s for s in all_students if s not in forced_students]
     students_early = [s for s in all_students if dates[s] < early_cut]
     students_mid = [s for s in all_students if early_cut <= dates[s] < mid_cut]
     students_late = [s for s in all_students if dates[s] >= mid_cut]
@@ -345,10 +379,8 @@ def main():
 
     # 5) Solve sequentially for each group
     rows += solve_group(students_early, zone_map, cost, cap_map, full_map, days, late=False)
-
-    # Remaining students are scheduled greedily based on their preferences
-    remaining_students = students_mid + students_late
-    rows += solve_group(remaining_students, zone_map, cost, cap_map, full_map, days, late=True)
+    rows += solve_group(students_mid, zone_map, cost, cap_map, full_map, days, late=False)
+    rows += solve_group(students_late, zone_map, cost, cap_map, full_map, days, late=True)
 
     out = pd.DataFrame(rows)
     out = out[['Student', 'Zone', 'Day', 'Session', 'Workshop Title']]
