@@ -415,19 +415,32 @@ def main():
         ],
     }
 
-    def load_vissen_assignments():
+    def load_previous_assignments(titles):
+        """Return mapping of students to already assigned workshops.
+
+        Parameters
+        ----------
+        titles : Iterable[str]
+            Workshop titles to consider.  Matching is case-insensitive.
+        """
+
         df = pd.read_csv('einde.csv')
-        df = df[df['Workshop Title'].str.lower() == 'vissen']
+        titles_lower = {t.lower() for t in titles}
+        df = df[df['Workshop Title'].str.lower().isin(titles_lower)]
+
         mapping = {}
         for _, r in df.iterrows():
             stu = r['Student']
+            w = r['Workshop Title']
             d = r['Day']
             t = int(r['Session'])
-            mapping.setdefault(stu, []).append(('Vissen', d, t))
+            mapping.setdefault(stu, []).append((w, d, t))
         return mapping
 
-    # merge all preassigned vissen slots
-    for stu, slots in load_vissen_assignments().items():
+    # merge all preassigned slots from earlier runs
+    prev_titles = ['Vissen', 'Camping sportactiviteiten', 'Eigen sportspel ontwerpen']
+    prev_assignments = load_previous_assignments(prev_titles)
+    for stu, slots in prev_assignments.items():
         if stu in pre_assign:
             existing = set(pre_assign[stu])
             for sl in slots:
@@ -436,7 +449,7 @@ def main():
         else:
             pre_assign[stu] = slots
 
-    forced_students = {'jesse wolters', 'niels hielkema'}
+    forced_students = {'jesse wolters', 'niels hielkema'} | set(prev_assignments)
 
     # 3) Build capacity maps and subtract preassigned seats
     grp = (
