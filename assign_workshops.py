@@ -109,7 +109,22 @@ def greedy_assign(students, zone_map, cost, cap_map, full_map, days):
     return rows
 
 
-def solve_group(students, zone_map, cost, cap_map, full_map, days, *, late: bool = False):
+from collections import defaultdict
+
+
+def solve_group(
+    students,
+    zone_map,
+    cost,
+    cap_map,
+    full_map,
+    days,
+    *,
+    pre_half=None,
+    pre_full=None,
+    pre_slots=None,
+    late: bool = False,
+):
     """Assign workshops for a subset of students.
 
     Parameters
@@ -143,6 +158,10 @@ def solve_group(students, zone_map, cost, cap_map, full_map, days, *, late: bool
     if late:
         return greedy_assign(students, zone_map, cost, cap_map, full_map, days)
 
+    pre_half = pre_half or {}
+    pre_full = pre_full or {}
+    pre_slots = pre_slots or {}
+
     def build_problem(enforce_zone=True):
         prob = pulp.LpProblem('Workshop_Assignment', pulp.LpMinimize)
         x = {
@@ -158,6 +177,8 @@ def solve_group(students, zone_map, cost, cap_map, full_map, days, *, late: bool
         if enforce_zone:
             for s in students:
                 for z in zones:
+                    pre_h = pre_half.get((s, z), 0)
+                    pre_f = pre_full.get((s, z), 0)
                     half_pairs = [
                         (w, x[(s, w, d, t)])
                         for (w, d, t) in cap_map
@@ -186,20 +207,22 @@ def solve_group(students, zone_map, cost, cap_map, full_map, days, *, late: bool
 
                     allow_random = 1 if len(rank2_set) == 0 else 0
 
+                    required = 2 - pre_f * 2 - pre_h
+
                     prob += (
                         first_total + second_total + other_total
-                        == 2 - full_total,
+                        == required - full_total,
                         f"TwoPerZone_{s}_{z}",
                     )
                     prob += (
-                        second_total >= (2 - full_total) - first_total,
+                        second_total >= (required - full_total) - first_total,
                         f"UseSeconds_{s}_{z}",
                     )
                     prob += (
                         other_total <= allow_random,
                         f"RandLimit_{s}_{z}",
                     )
-                    prob += (full_total <= 1, f"OneFull_{s}_{z}")
+                    prob += (full_total <= 1 - pre_f, f"OneFull_{s}_{z}")
     
         for (w, d, t), cap in cap_map.items():
             prob += (
@@ -221,6 +244,8 @@ def solve_group(students, zone_map, cost, cap_map, full_map, days, *, late: bool
     
         for s in students:
             for d in days:
+                pre1 = pre_slots.get((s, d, 1), 0)
+                pre2 = pre_slots.get((s, d, 2), 0)
                 prob += (
                     pulp.lpSum(
                         x[(s, w, d, 1)]
@@ -232,7 +257,7 @@ def solve_group(students, zone_map, cost, cap_map, full_map, days, *, late: bool
                         for (w, d2, t) in cap_map
                         if d2 == d and t == 0 and full_map[(w, d2, t)]
                     )
-                    == 1,
+                    == 1 - pre1,
                     f"OnePerSlot_{s}_{d}_Sess1",
                 )
                 prob += (
@@ -246,7 +271,7 @@ def solve_group(students, zone_map, cost, cap_map, full_map, days, *, late: bool
                         for (w, d2, t) in cap_map
                         if d2 == d and t == 0 and full_map[(w, d2, t)]
                     )
-                    == 1,
+                    == 1 - pre2,
                     f"OnePerSlot_{s}_{d}_Sess2",
                 )
     
@@ -356,6 +381,21 @@ def main():
         cap_map[(w, d, t)] = cap
         full_map[(w, d, t)] = full
 
+    # count pre-assigned slots per zone and per day/session
+    pre_half = defaultdict(int)
+    pre_full = defaultdict(int)
+    pre_slots = defaultdict(int)
+    for student, slots in pre_assign.items():
+        for (w, d, t) in slots:
+            z = zone_map[w]
+            if t == 0:
+                pre_full[(student, z)] += 1
+                pre_slots[(student, d, 1)] += 1
+                pre_slots[(student, d, 2)] += 1
+            else:
+                pre_half[(student, z)] += 1
+                pre_slots[(student, d, t)] += 1
+
     # 4) Determine student groups based on submission date
     early_cut = datetime(2025, 6, 23)
     mid_cut = datetime(2025, 6, 24)
@@ -378,9 +418,42 @@ def main():
             })
 
     # 5) Solve sequentially for each group
-    rows += solve_group(students_early, zone_map, cost, cap_map, full_map, days, late=False)
-    rows += solve_group(students_mid, zone_map, cost, cap_map, full_map, days, late=False)
-    rows += solve_group(students_late, zone_map, cost, cap_map, full_map, days, late=True)
+    rows += solve_group(
+        students_early,
+        zone_map,
+        cost,
+        cap_map,
+        full_map,
+        days,
+        pre_half=pre_half,
+        pre_full=pre_full,
+        pre_slots=pre_slots,
+        late=False,
+    )
+    rows += solve_group(
+        students_mid,
+        zone_map,
+        cost,
+        cap_map,
+        full_map,
+        days,
+        pre_half=pre_half,
+        pre_full=pre_full,
+        pre_slots=pre_slots,
+        late=False,
+    )
+    rows += solve_group(
+        students_late,
+        zone_map,
+        cost,
+        cap_map,
+        full_map,
+        days,
+        pre_half=pre_half,
+        pre_full=pre_full,
+        pre_slots=pre_slots,
+        late=True,
+    )
 
     out = pd.DataFrame(rows)
     out = out[['Student', 'Zone', 'Day', 'Session', 'Workshop Title']]
