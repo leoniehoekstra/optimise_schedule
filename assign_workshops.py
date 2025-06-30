@@ -40,71 +40,131 @@ def build_student_dates(prefs):
     return prefs.groupby('Student')['Parsed_Date'].first().to_dict()
 
 
-def greedy_assign(students, zone_map, cost, cap_map, full_map, days):
-    """Greedily assign remaining students to any available slots.
+def greedy_assign(
+    students,
+    zone_map,
+    cost,
+    cap_map,
+    full_map,
+    days,
+    *,
+    pre_half=None,
+    pre_full=None,
+    pre_slots=None,
+):
+    """Greedily assign remaining students while respecting zone quotas.
 
-    The assignment prefers lower ranked workshops but does not enforce the
-    complex two-per-zone requirement.  Capacity limits and the restriction
-    that a student may not receive the same workshop twice are still
-    honoured.
+    This heuristic attempts to satisfy the rule that every student follows
+    the "two workshops per zone" guideline.  A full‑day workshop counts as
+    two.  Previously this function simply grabbed any available workshop and
+    therefore violated the zone requirement for many students.
+
+    Parameters
+    ----------
+    pre_half, pre_full : dict
+        Pre-assigned half-/full-day counts per ``(student, zone)``.
+    pre_slots : dict
+        Mapping ``(student, day, session)`` to the number of already filled
+        slots.  This prevents double-booking in slots that were fixed in
+        advance.
     """
+
+    pre_half = pre_half or {}
+    pre_full = pre_full or {}
+    pre_slots = pre_slots or {}
 
     rows = []
     workshops = sorted({w for (w, _, _) in cap_map})
+    zones = sorted(set(zone_map.values()))
 
     for s in students:
         used_workshops = set()
-        used_slots = {}
+        used_slots = {
+            (d, t): True
+            for (stu, d, t), val in pre_slots.items()
+            if stu == s and val
+        }
+
+        zone_need = {
+            z: max(0, 2 - pre_half.get((s, z), 0) - 2 * pre_full.get((s, z), 0))
+            for z in zones
+        }
+        zone_full_used = {z: pre_full.get((s, z), 0) for z in zones}
 
         for day in days:
-            # try a full-day workshop first
-            full_candidates = [
-                w for (w, d, t) in cap_map
-                if d == day and t == 0 and cap_map[(w, d, t)] > 0
-                and w not in used_workshops
-            ]
-            full_candidates.sort(key=lambda w: cost.get((s, w), 99))
+            # full-day assignment if both sessions free and a zone still needs 2
+            if not used_slots.get((day, 1)) and not used_slots.get((day, 2)):
+                full_candidates = [
+                    w
+                    for (w, d, t) in cap_map
+                    if d == day
+                    and t == 0
+                    and cap_map[(w, d, t)] > 0
+                    and zone_need[zone_map[w]] == 2
+                    and zone_full_used[zone_map[w]] == 0
+                    and w not in used_workshops
+                ]
+                if full_candidates:
+                    w = min(full_candidates, key=lambda w: cost.get((s, w), 99))
+                    z = zone_map[w]
+                    rows.append(
+                        {
+                            'Student': s,
+                            'Zone': z,
+                            'Day': day,
+                            'Session': 0,
+                            'Workshop Title': w,
+                        }
+                    )
+                    cap_map[(w, day, 0)] -= 1
+                    used_workshops.add(w)
+                    used_slots[(day, 1)] = True
+                    used_slots[(day, 2)] = True
+                    zone_need[z] = 0
+                    zone_full_used[z] = 1
+                    continue
 
-            if full_candidates:
-                w = full_candidates[0]
-                rows.append({
-                    'Student': s,
-                    'Zone': zone_map[w],
-                    'Day': day,
-                    'Session': 0,
-                    'Workshop Title': w,
-                })
-                cap_map[(w, day, 0)] -= 1
-                used_workshops.add(w)
-                used_slots[(day, 1)] = True
-                used_slots[(day, 2)] = True
-                continue
-
-            # otherwise handle the two half-day slots
+            # handle half-day slots
             for sess in [1, 2]:
                 if used_slots.get((day, sess)):
                     continue
 
                 candidates = [
-                    w for (w, d, t) in cap_map
-                    if d == day and t == sess and cap_map[(w, d, t)] > 0
+                    w
+                    for (w, d, t) in cap_map
+                    if d == day
+                    and t == sess
+                    and cap_map[(w, d, t)] > 0
                     and w not in used_workshops
+                    and zone_need[zone_map[w]] > 0
                 ]
-                if not candidates:
-                    continue
 
-                candidates.sort(key=lambda w: cost.get((s, w), 99))
-                w = candidates[0]
-                rows.append({
-                    'Student': s,
-                    'Zone': zone_map[w],
-                    'Day': day,
-                    'Session': sess,
-                    'Workshop Title': w,
-                })
+                if not candidates:
+                    # no candidate that fits zone quota, try any zone
+                    candidates = [
+                        w
+                        for (w, d, t) in cap_map
+                        if d == day and t == sess and cap_map[(w, d, t)] > 0
+                        and w not in used_workshops
+                    ]
+                    if not candidates:
+                        continue
+
+                w = min(candidates, key=lambda w: cost.get((s, w), 99))
+                z = zone_map[w]
+                rows.append(
+                    {
+                        'Student': s,
+                        'Zone': z,
+                        'Day': day,
+                        'Session': sess,
+                        'Workshop Title': w,
+                    }
+                )
                 cap_map[(w, day, sess)] -= 1
                 used_workshops.add(w)
                 used_slots[(day, sess)] = True
+                zone_need[z] = max(0, zone_need[z] - 1)
 
     return rows
 
@@ -156,7 +216,17 @@ def solve_group(
     # solving the full MILP.  This keeps the problem feasible while still
     # respecting capacities and avoiding duplicate workshops.
     if late:
-        return greedy_assign(students, zone_map, cost, cap_map, full_map, days)
+        return greedy_assign(
+            students,
+            zone_map,
+            cost,
+            cap_map,
+            full_map,
+            days,
+            pre_half=pre_half,
+            pre_full=pre_full,
+            pre_slots=pre_slots,
+        )
 
     pre_half = pre_half or {}
     pre_full = pre_full or {}
@@ -294,7 +364,17 @@ def solve_group(
     
     if status != 'Optimal':
         print(f"MILP solver returned {status}. Falling back to greedy.")
-        return greedy_assign(students, zone_map, cost, cap_map, full_map, days)
+        return greedy_assign(
+            students,
+            zone_map,
+            cost,
+            cap_map,
+            full_map,
+            days,
+            pre_half=pre_half,
+            pre_full=pre_full,
+            pre_slots=pre_slots,
+        )
     
     rows = []
     for (s, w, d, t), var in x.items():
