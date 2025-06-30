@@ -207,15 +207,15 @@ def solve_group(
 
                     allow_random = 1 if len(rank2_set) == 0 else 0
 
-                    required = 2 - pre_f * 2 - pre_h
+                    required = 2 - pre_h - 2 * pre_f
 
                     prob += (
-                        first_total + second_total + other_total
-                        == required - full_total,
+                        first_total + second_total + other_total + 2 * full_total
+                        == required,
                         f"TwoPerZone_{s}_{z}",
                     )
                     prob += (
-                        second_total >= (required - full_total) - first_total,
+                        second_total >= (required - 2 * full_total) - first_total,
                         f"UseSeconds_{s}_{z}",
                     )
                     prob += (
