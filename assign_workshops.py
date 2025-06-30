@@ -275,17 +275,33 @@ def solve_group(
                     other_total = pulp.lpSum(other_half) + pulp.lpSum(other_full)
                     full_total = pulp.lpSum(first_full + second_full + other_full)
 
-                    allow_random = 1 if len(rank2_set) == 0 else 0
+                    # Allow random assignments when necessary.  Limiting these
+                    # to zero caused infeasibility whenever preferred
+                    # workshops were full.  Because each zone requires two
+                    # slots, a generous upper bound of ``2`` effectively means
+                    # "no restriction" while still keeping the constraint
+                    # well-formed.
+                    allow_random = 2
 
                     required = 2 - pre_h - 2 * pre_f
 
+                    # ``first_total + second_total + other_total`` counts every
+                    # assigned workshop once, regardless of duration.  We want
+                    # a full‑day workshop to count as two half‑day slots, so
+                    # add ``full_total`` once more instead of twice.  The
+                    # previous version mistakenly weighted a full‑day workshop
+                    # by three which made the strict MILP infeasible whenever a
+                    # full‑day slot was chosen.
                     prob += (
-                        first_total + second_total + other_total + 2 * full_total
+                        first_total + second_total + other_total + full_total
                         == required,
                         f"TwoPerZone_{s}_{z}",
                     )
+                    # Do not enforce a minimum number of second-preference
+                    # assignments.  Requiring this made some instances
+                    # infeasible when capacity for second choices was limited.
                     prob += (
-                        second_total >= (required - 2 * full_total) - first_total,
+                        second_total >= 0,
                         f"UseSeconds_{s}_{z}",
                     )
                     prob += (
@@ -449,7 +465,12 @@ def main():
         else:
             pre_assign[stu] = slots
 
-    forced_students = {'jesse wolters', 'niels hielkema'} | set(prev_assignments)
+    # Only Jesse and Niels are fully fixed; previously we also excluded all
+    # students that appeared in ``prev_assignments``.  That left many students
+    # with only a couple of pre-assigned workshops and no further scheduling.
+    # Keep them in the optimization so that every student receives a complete
+    # roster.
+    forced_students = {'jesse wolters', 'niels hielkema'}
 
     # 3) Build capacity maps and subtract preassigned seats
     grp = (
